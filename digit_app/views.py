@@ -23,7 +23,7 @@ os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
 
-# 模型优化：增加特征区分度，聚焦7/9、6/4的核心特征
+# 模型优化：增加特征区分度，聚焦7/9、6/4、3/9的核心特征
 def train_model():
     digits = load_digits()
     X, y = digits.data, digits.target
@@ -31,10 +31,10 @@ def train_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # 优化参数：强化特征区分，重点解决7/9、6/4混淆
+    # 优化参数：强化特征区分，重点解决7/9、6/4、3/9混淆
     rf_model = RandomForestClassifier(
         n_estimators=350,  # 适度增加树数量，提升特征区分
-        max_depth=18,  # 适度加深，学习7/9、6/4的细微特征
+        max_depth=18,  # 适度加深，学习7/9、6/4、3/9的细微特征
         min_samples_split=3,  # 降低分割阈值，捕捉数字细节
         min_samples_leaf=1,
         max_features='log2',  # 用log2特征数，聚焦核心区分特征
@@ -43,7 +43,7 @@ def train_model():
     )
     rf_model.fit(X_train, y_train)
 
-    # 输出特征重要性（调试：看哪些像素对7/9、6/4区分最重要）
+    # 输出特征重要性（调试：看哪些像素对7/9、6/4、3/9区分最重要）
     feature_importance = rf_model.feature_importances_
     print(f"前10个重要特征索引：{np.argsort(feature_importance)[-10:]}")
 
@@ -102,7 +102,7 @@ def remove_small_blobs(binary_img, min_area=3):
     return clean_img
 
 
-# 预处理优化：强化7/6的核心特征（7的横线、6的圆圈）
+# 预处理优化：强化7/6/3的核心特征
 def preprocess_image(image_path):
     try:
         # 1. 打开图片并转为灰度
@@ -111,14 +111,14 @@ def preprocess_image(image_path):
         img = img.resize((100, 100), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.uint8)
 
-        # ========== 关键优化：微调阈值（90→85），强化7的横线、6的圆圈 ==========
+        # ========== 关键优化：微调阈值（90→85），强化7/6/3的核心特征 ==========
         _, img_binary = cv2.threshold(img_array, 85, 255, cv2.THRESH_BINARY)
 
         # 温和去噪（只删极小方块）
         img_binary = remove_small_blobs(img_binary, min_area=3)
 
-        # ========== 新增：形态学增强（强化7/6的核心轮廓） ==========
-        # 小核开运算：强化7的顶部横线、6的底部圆圈
+        # ========== 新增：形态学增强（强化3的上下曲线特征） ==========
+        # 小核开运算：强化3的上下曲线、2的底部横线、7的顶部横线
         kernel = np.ones((1, 1), np.uint8)
         img_binary = cv2.morphologyEx(img_binary, cv2.MORPH_OPEN, kernel)
 
@@ -131,7 +131,7 @@ def preprocess_image(image_path):
         img = img.resize((8, 8), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.float32)
 
-        # 灰度映射+弱阈值过滤（保留7/6的特征）
+        # 灰度映射+弱阈值过滤（保留7/6/2/3的特征）
         img_array = (img_array - img_array.min()) / (img_array.max() - img_array.min() + 1e-8) * 255
         img_normalized = (255 - img_array) / 255 * 16
         img_normalized = np.where(img_normalized < 0.5, 0, img_normalized)  # 极弱特征才过滤
@@ -156,12 +156,53 @@ def preprocess_image(image_path):
         raise ValueError(f"图片预处理失败：{str(e)}（请按参考样式制作PNG图片）")
 
 
-# 新增：预测后修正（解决7/9、6/4混淆）
+# 预测后修正（解决3→9、2→7、7→9、6→4混淆，全量生效）
 def correct_prediction(img_flat, pred, pred_proba):
     # 8x8特征重塑
     img_8x8 = img_flat.reshape(8, 8)
 
-    # 规则1：7 vs 9 修正
+    # ========== 优先级0：3 → 9 修正（核心解决当前3被识别为9的问题） ==========
+    if pred == 9:
+        # 3的核心特征：上下双曲线（顶部0-3行、底部5-8行右侧有像素），无底部闭合
+        three_top_curve = np.sum(img_8x8[0:3, 5:7])  # 3的顶部曲线像素和
+        three_bottom_curve = np.sum(img_8x8[5:8, 5:7])  # 3的底部曲线像素和
+        nine_bottom_close = np.sum(img_8x8[6:8, 2:5])  # 9的底部闭合像素和
+        total_three_pixels = three_top_curve + three_bottom_curve  # 3的核心像素和
+
+        # 打印调试信息
+        print(
+            f"3→9修正调试：3顶部曲线={three_top_curve}，3底部曲线={three_bottom_curve}，9底部闭合={nine_bottom_close}，3核心像素和={total_three_pixels}")
+
+        # 触发条件：3的概率≥0.2 + 3核心像素和>10 + 9底部闭合<5
+        if pred_proba[3] >= 0.2 and total_three_pixels > 10 and nine_bottom_close < 5:
+            pred = 3
+            print(f"修正预测：9 → 3（3的概率{pred_proba[3]:.4f}，9的概率{pred_proba[9]:.4f}）")
+
+    # ========== 优先级1：2 → 7 修正（保留已生效的2的修正逻辑） ==========
+    if pred == 7:
+        # 打印调试像素值，便于排查
+        two_bottom_line = np.sum(img_8x8[6:8, 2:6])  # 2的底部横线像素和
+        seven_bottom = np.sum(img_8x8[6:8, :])  # 7的底部像素和
+        two_right_curve = np.sum(img_8x8[3:5, 5:7])  # 2的右侧曲线
+        two_top_curve = np.sum(img_8x8[0:3, 5:7])  # 2的顶部曲线
+        total_pixels = np.sum(img_8x8)  # 总像素数
+        print(
+            f"2→7修正调试：底部横线={two_bottom_line}，7底部={seven_bottom}，右侧曲线={two_right_curve}，顶部曲线={two_top_curve}，总像素={total_pixels}")
+
+        # 条件1：宽松的像素特征（只要满足任意一个就触发）
+        pixel_condition = (two_bottom_line > 1) or (two_right_curve > 1) or (two_top_curve > 1)
+        # 条件2：2的概率≥0.05
+        prob_condition = pred_proba[2] >= 0.05
+        # 条件3：7和2的概率差≤0.1
+        diff_condition = (pred_proba[7] - pred_proba[2]) <= 0.1
+
+        # 三个条件满足任意两个，就修正为2
+        if sum([pixel_condition, prob_condition, diff_condition]) >= 2:
+            pred = 2
+            print(
+                f"修正预测：7 → 2（2的概率{pred_proba[2]:.4f}，7的概率{pred_proba[7]:.4f}，概率差{pred_proba[7] - pred_proba[2]:.4f}）")
+
+    # ========== 优先级2：7 → 9 修正（原有正确逻辑） ==========
     if pred == 9 and pred_proba[7] > 0.1:
         # 7的核心特征：顶部横线（第0-2行，第4-7列）有像素，底部无闭合
         top_row_pixels = np.sum(img_8x8[0:2, 4:7])  # 7的顶部横线像素和
@@ -170,7 +211,7 @@ def correct_prediction(img_flat, pred, pred_proba):
             pred = 7
             print(f"修正预测：9 → 7（7的概率{pred_proba[7]:.4f}，9的概率{pred_proba[9]:.4f}）")
 
-    # 规则2：6 vs 4 修正
+    # ========== 优先级3：6 → 4 修正（原有正确逻辑） ==========
     if pred == 4 and pred_proba[6] > 0.08:
         # 6的核心特征：底部圆圈（第6-8行，第2-5列）有像素，4无闭合底部
         bottom_circle_pixels = np.sum(img_8x8[5:7, 2:5])  # 6的底部圆圈像素和
@@ -230,7 +271,7 @@ def predict(request):
         pred = model.predict([img_flat])[0]
         pred_proba = model.predict_proba([img_flat])[0]
 
-        # 预测后修正（核心：解决7/9、6/4混淆）
+        # 预测后修正（核心：解决3→9、2→7、7→9、6→4混淆）
         pred = correct_prediction(img_flat, pred, pred_proba)
 
         prob_info = {i: f"{p:.4f}" for i, p in enumerate(pred_proba)}
@@ -245,7 +286,7 @@ def predict(request):
         }
         return render(request, 'digit_app/result.html', context)
     except ValueError as e:
-        return render(request, 'digit_app/upload.html', {'error': str(e)})
+        return render(request,  'digit_app/upload.html', {'error': str(e)})
     except Exception as e:
         import traceback
         traceback.print_exc()
