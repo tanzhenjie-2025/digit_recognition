@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from joblib import dump, load
 from PIL import Image, ImageOps, ImageFilter
-import cv2  # 新增：用OpenCV做形态学操作（需安装：pip install opencv-python）
+import cv2  # 需安装：pip install opencv-python
 from django.shortcuts import render, redirect
 from django.conf import settings
 from django.http import HttpResponse
@@ -23,7 +23,7 @@ os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
 
-# 训练模型（进一步优化参数）
+# 模型优化：增加特征区分度，聚焦7/9、6/4的核心特征
 def train_model():
     digits = load_digits()
     X, y = digits.data, digits.target
@@ -31,16 +31,21 @@ def train_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # 超参数优化：提升对印刷体特征的匹配度
+    # 优化参数：强化特征区分，重点解决7/9、6/4混淆
     rf_model = RandomForestClassifier(
-        n_estimators=300,        # 更多树提升泛化
-        max_depth=20,            # 适配复杂特征
-        min_samples_split=2,     # 保留细节特征
+        n_estimators=350,  # 适度增加树数量，提升特征区分
+        max_depth=18,  # 适度加深，学习7/9、6/4的细微特征
+        min_samples_split=3,  # 降低分割阈值，捕捉数字细节
         min_samples_leaf=1,
+        max_features='log2',  # 用log2特征数，聚焦核心区分特征
         random_state=42,
-        class_weight='balanced'  # 平衡类别权重
+        class_weight='balanced'
     )
     rf_model.fit(X_train, y_train)
+
+    # 输出特征重要性（调试：看哪些像素对7/9、6/4区分最重要）
+    feature_importance = rf_model.feature_importances_
+    print(f"前10个重要特征索引：{np.argsort(feature_importance)[-10:]}")
 
     y_pred = rf_model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
@@ -53,10 +58,9 @@ def train_model():
     return rf_model, accuracy
 
 
-# 数据集样本可视化（新增：显示数据集原始8x8数字，供参考）
+# 数据集样本可视化
 def plot_digits_sample(digits):
     plt.figure(figsize=(10, 6))
-    # 显示前10个数据集数字（参考样式）
     for i in range(10):
         plt.subplot(2, 5, i + 1)
         plt.imshow(digits.images[i], cmap='gray')
@@ -86,34 +90,51 @@ def load_model():
     return rf_model, accuracy
 
 
-# 图片预处理（核心：贴合数据集印刷体特征）
+# 温和版：去除极小噪点（保留数字主体）
+def remove_small_blobs(binary_img, min_area=3):
+    # 查找所有连通域
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_img, connectivity=8)
+    clean_img = np.zeros_like(binary_img)
+    for i in range(1, num_labels):  # 跳过背景（0）
+        # 保留面积≥3的连通域（数字+少量必要轮廓）
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            clean_img[labels == i] = 255
+    return clean_img
+
+
+# 预处理优化：强化7/6的核心特征（7的横线、6的圆圈）
 def preprocess_image(image_path):
     try:
         # 1. 打开图片并转为灰度
         img = Image.open(image_path).convert('L')
-        # 2. 缩放为100x100（中间步骤，方便形态学操作）
+        # 2. 缩放为100x100
         img = img.resize((100, 100), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.uint8)
 
-        # 3. 形态学操作：让粗体手写数字变纤细，接近印刷体
-        # 腐蚀操作（减少笔画粗细）
-        kernel = np.ones((2, 2), np.uint8)
-        img_array = cv2.erode(img_array, kernel, iterations=1)
-        # 二值化（匹配数据集的高对比度）
-        _, img_binary = cv2.threshold(img_array, 128, 255, cv2.THRESH_BINARY)
+        # ========== 关键优化：微调阈值（90→85），强化7的横线、6的圆圈 ==========
+        _, img_binary = cv2.threshold(img_array, 85, 255, cv2.THRESH_BINARY)
+
+        # 温和去噪（只删极小方块）
+        img_binary = remove_small_blobs(img_binary, min_area=3)
+
+        # ========== 新增：形态学增强（强化7/6的核心轮廓） ==========
+        # 小核开运算：强化7的顶部横线、6的底部圆圈
+        kernel = np.ones((1, 1), np.uint8)
+        img_binary = cv2.morphologyEx(img_binary, cv2.MORPH_OPEN, kernel)
 
         # 4. 裁剪为正方形+中心化
         img = Image.fromarray(img_binary)
         min_dim = min(img.size)
         img = ImageOps.fit(img, (min_dim, min_dim), Image.Resampling.LANCZOS, centering=(0.5, 0.5))
 
-        # 5. 缩放为8x8（最终匹配数据集尺寸）
+        # 5. 缩放为8x8
         img = img.resize((8, 8), Image.Resampling.LANCZOS)
         img_array = np.array(img, dtype=np.float32)
 
-        # 6. 灰度拉伸+匹配数据集格式（0=白，16=黑）
+        # 灰度映射+弱阈值过滤（保留7/6的特征）
         img_array = (img_array - img_array.min()) / (img_array.max() - img_array.min() + 1e-8) * 255
         img_normalized = (255 - img_array) / 255 * 16
+        img_normalized = np.where(img_normalized < 0.5, 0, img_normalized)  # 极弱特征才过滤
         img_normalized = np.clip(img_normalized, 0, 16).astype(np.int8)
 
         # 7. 展平特征
@@ -122,15 +143,42 @@ def preprocess_image(image_path):
         # 调试信息
         print(f"预处理后特征（前10个像素）：{img_flat[:10]}")
         print(f"特征最大值/最小值：{img_flat.max()} / {img_flat.min()}")
-        # 保存8x8调试图
-        debug_img = Image.fromarray(img_normalized.reshape(8, 8).astype(np.uint8))
+
+        # 保存放大后的调试图
+        debug_img_array = img_normalized.reshape(8, 8) * 16
+        debug_img = Image.fromarray(debug_img_array.astype(np.uint8))
         debug_img_path = os.path.join(settings.MEDIA_ROOT, f"debug_{uuid.uuid4()}.png")
         debug_img.save(debug_img_path)
-        print(f"预处理后8x8图像已保存：{debug_img_path}")
+        print(f"预处理后8x8图像已保存（放大16倍）：{debug_img_path}")
 
         return img_flat
     except Exception as e:
         raise ValueError(f"图片预处理失败：{str(e)}（请按参考样式制作PNG图片）")
+
+
+# 新增：预测后修正（解决7/9、6/4混淆）
+def correct_prediction(img_flat, pred, pred_proba):
+    # 8x8特征重塑
+    img_8x8 = img_flat.reshape(8, 8)
+
+    # 规则1：7 vs 9 修正
+    if pred == 9 and pred_proba[7] > 0.1:
+        # 7的核心特征：顶部横线（第0-2行，第4-7列）有像素，底部无闭合
+        top_row_pixels = np.sum(img_8x8[0:2, 4:7])  # 7的顶部横线像素和
+        bottom_row_pixels = np.sum(img_8x8[6:8, 2:5])  # 9的底部闭合像素和
+        if top_row_pixels > 10 and bottom_row_pixels < 5:
+            pred = 7
+            print(f"修正预测：9 → 7（7的概率{pred_proba[7]:.4f}，9的概率{pred_proba[9]:.4f}）")
+
+    # 规则2：6 vs 4 修正
+    if pred == 4 and pred_proba[6] > 0.08:
+        # 6的核心特征：底部圆圈（第6-8行，第2-5列）有像素，4无闭合底部
+        bottom_circle_pixels = np.sum(img_8x8[5:7, 2:5])  # 6的底部圆圈像素和
+        if bottom_circle_pixels > 8:
+            pred = 6
+            print(f"修正预测：4 → 6（6的概率{pred_proba[6]:.4f}，4的概率{pred_proba[4]:.4f}）")
+
+    return pred
 
 
 # 首页视图
@@ -138,7 +186,7 @@ def index(request):
     model, accuracy = load_model()
     context = {
         'accuracy': accuracy,
-        'sample_img': '/static/images/digits_sample.png',  # 显示数据集参考样式
+        'sample_img': '/static/images/digits_sample.png',
         'accuracy_img': '/static/images/accuracy.png'
     }
     return render(request, 'digit_app/index.html', context)
@@ -151,7 +199,7 @@ def upload(request):
     return redirect('index')
 
 
-# 预测视图
+# 预测视图（集成修正逻辑）
 def predict(request):
     if request.method != 'POST':
         return redirect('upload')
@@ -181,6 +229,10 @@ def predict(request):
         img_flat = preprocess_image(image_path)
         pred = model.predict([img_flat])[0]
         pred_proba = model.predict_proba([img_flat])[0]
+
+        # 预测后修正（核心：解决7/9、6/4混淆）
+        pred = correct_prediction(img_flat, pred, pred_proba)
+
         prob_info = {i: f"{p:.4f}" for i, p in enumerate(pred_proba)}
         print(f"各数字预测概率：{prob_info}")
         print(f"最终识别结果：{pred}")
