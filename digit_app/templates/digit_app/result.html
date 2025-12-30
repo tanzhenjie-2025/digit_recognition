@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>手写数字识别 - 结果</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .result { text-align: center; margin-bottom: 30px; }
+        .result h2 { color: #28a745; }
+        img { max-width: 200px; border: 1px solid #ddd; padding: 5px; }
+        .btn { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; margin: 0 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>手写数字识别结果</h1>
+        </div>
+
+        <div class="result">
+            <h2>识别结果：{{ prediction }}</h2>
+            <p>模型整体识别率：{{ accuracy|floatformat:4 }}</p>
+            <img src="{{ uploaded_image }}" alt="上传的手写数字图片">
+        </div>
+
+        <div class="section">
+            <h3>模型准确率可视化</h3>
+            <img src="{{ accuracy_img }}" alt="准确率图表">
+        </div>
+
+        <div class="btn-group" style="text-align: center; margin-top: 30px;">
+            <a href="{% url 'upload' %}" class="btn">再次上传</a>
+            <a href="{% url 'index' %}" class="btn">返回首页</a>
+        </div>
+    </div>
+</body>
+</html>
